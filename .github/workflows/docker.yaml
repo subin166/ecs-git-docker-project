@@ -1,23 +1,46 @@
----
 name: Docker automation
+
 on:
   push:
     branches: [main]
-    paths: 'application/**'
+    paths:
+      - 'application/**'
 
 jobs:
   docker-automation-steps:
     runs-on: ubuntu-latest
+
     steps:
-      - name: checkout
+      - name: Set short SHA
+        run: echo "SHORT_SHA=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
+      - name: Checkout
         uses: actions/checkout@v4
-      - name: build
-        run: docker build -t subin166/nodeapp:latest ./application
-      - name: docker login
-        uses: docker/login-action@v3
+
+      # 🔐 AWS Auth
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          USERNAME: ${{secrets.DOCKER_USERNAME}}
-          PASSWORD: ${{secrets.DOCKER_TOKEN}}
-      - name: Push images
-        run: docker push subin166/nodeapp:latest
-        
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ap-southeast-2
+
+      # 🔐 ECR Login
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # 🐳 Build image
+      - name: Build Docker image
+        run: docker build -t nodeapp:latest ./application
+
+      # 🏷 Tag image (using step output)
+      - name: Tag image
+        run: |
+          docker tag nodeapp:latest \
+          ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ env.SHORT_SHA }}
+
+      # 📤 Push image
+      - name: Push image
+        run: |
+          docker push \
+          ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ env.SHORT_SHA }}
