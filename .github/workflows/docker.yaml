@@ -44,3 +44,26 @@ jobs:
         run: |
           docker push \
           ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ env.SHORT_SHA }}
+
+
+
+      - name: Update ECS task definition
+        run: |
+          IMAGE=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ env.SHORT_SHA }}
+
+          TASK_DEF=$(aws ecs describe-task-definition --task-definition app --query taskDefinition)
+
+          NEW_TASK_DEF=$(echo $TASK_DEF | jq \
+          --arg IMAGE "$IMAGE" \
+          '.containerDefinitions[0].image=$IMAGE
+          | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)')
+
+          echo "$NEW_TASK_DEF" > new-task-def.json
+
+          aws ecs register-task-definition \
+          --cli-input-json file://new-task-def.json
+
+          aws ecs update-service \
+          --cluster ecs-node-cluster \
+          --service app-service \
+          --force-new-deployment
