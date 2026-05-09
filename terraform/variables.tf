@@ -14,11 +14,11 @@ variable "container_image" {
 variable "domain" {
   description = "Domain name used to look up the Route53 hosted zone."
   type        = string
-  default = "kunchirakkattu.com"
+  default     = "kunchirakkattu.com"
 }
 
 variable "record" {
   description = "Record name to be created inside the hosted zone."
   type        = string
-  default = "app"
+  default     = "app"
 }

@@ -1,116 +1,19 @@
-resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr_block
-  instance_tenancy     = "default"
-  enable_dns_hostnames = true
+module "vpc" {
+  source = "./modules/vpc"
 
-  tags = {
-    Name = "${var.project_name}-${var.project_environment}"
-  }
-}
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.main.id
+  project_name   = var.project_name
+  environment    = var.project_environment
+  vpc_cidr_block = var.vpc_cidr_block
 
-  tags = {
-    Name = "${var.project_name}-${var.project_environment}"
-  }
+  azs = data.aws_availability_zones.available.names
 }
 
-resource "aws_subnet" "public_subnets" {
-  count                   = 3
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = cidrsubnet(var.vpc_cidr_block, 4, count.index)
-  availability_zone       = data.aws_availability_zones.available.names[count.index]
-  map_public_ip_on_launch = true
+module "security_groups" {
+  source = "./modules/security-groups"
 
-  tags = {
-    Name = "${var.project_name}-${var.project_environment}-public${count.index + 1}"
-  }
+  project_name = var.project_name
+  vpc_id       = module.vpc.vpc_id
 }
-resource "aws_subnet" "private_subnets" {
-  count                   = 3
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = cidrsubnet(var.vpc_cidr_block, 4, "${count.index + 3}")
-  availability_zone       = data.aws_availability_zones.available.names[count.index]
-  map_public_ip_on_launch = false
-
-  tags = {
-    Name = "${var.project_name}-${var.project_environment}-private${count.index + 1}"
-  }
-}
-
-
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.igw.id
-  }
-  tags = {
-    Name = "${var.project_name}-${var.project_environment}"
-  }
-}
-
-resource "aws_route_table_association" "public_associations" {
-  count          = 3
-  subnet_id      = aws_subnet.public_subnets[count.index].id
-  route_table_id = aws_route_table.public.id
-}
-
-resource "aws_route_table" "private" {
-  vpc_id = aws_vpc.main.id
-
-  tags = {
-    Name = "${var.project_name}-${var.project_environment}"
-  }
-}
-resource "aws_route_table_association" "private_associations" {
-  count          = 3
-  subnet_id      = aws_subnet.private_subnets[count.index].id
-  route_table_id = aws_route_table.private.id
-}
-
-resource "aws_security_group" "ecs_sg" {
-  vpc_id = aws_vpc.main.id
-
-  ingress {
-    from_port       = 3000
-    to_port         = 3000
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb_sg.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-resource "aws_security_group" "alb_sg" {
-  vpc_id = aws_vpc.main.id
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
 resource "aws_iam_role" "ecs_task_execution_role" {
   name = "ecsTaskExecutionRole"
 
@@ -139,7 +42,7 @@ resource "aws_ecs_task_definition" "app" {
   network_mode             = "awsvpc"
   cpu                      = "256"
   memory                   = "512"
-  execution_role_arn = aws_iam_role.ecs_task_execution_role.arn
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
   container_definitions = jsonencode([
     {
       name      = "app"
@@ -151,7 +54,17 @@ resource "aws_ecs_task_definition" "app" {
           containerPort = 3000
           hostPort      = 3000
         }
+
       ]
+      logConfiguration = {
+        logDriver = "awslogs"
+
+        options = {
+          awslogs-group         = "/ecs/app"
+          awslogs-region        = "ap-southeast-2"
+          awslogs-stream-prefix = "ecs"
+        }
+      }
     }
   ])
 }
@@ -164,9 +77,8 @@ resource "aws_ecs_service" "service" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets = aws_subnet.public_subnets[*].id
-    assign_public_ip = true
-    security_groups  = [aws_security_group.ecs_sg.id]
+    subnets         = module.vpc.private_subnet_ids
+    security_groups = [module.security_groups.ecs_sg_id]
   }
 
   load_balancer {
@@ -175,7 +87,7 @@ resource "aws_ecs_service" "service" {
     container_port   = 3000
   }
 
-  depends_on = [aws_lb_listener.listener]
+  depends_on                         = [aws_lb_listener.listener]
   deployment_minimum_healthy_percent = 50
   deployment_maximum_percent         = 200
 }
@@ -183,7 +95,7 @@ resource "aws_ecs_service" "service" {
 resource "aws_lb_target_group" "tg" {
   port        = 3000
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = module.vpc.vpc_id
   target_type = "ip"
   health_check {
     path                = "/health"
@@ -199,8 +111,8 @@ resource "aws_lb" "app" {
   name               = "app-lb"
   internal           = false
   load_balancer_type = "application"
-  subnets = aws_subnet.public_subnets[*].id
-  security_groups = [aws_security_group.alb_sg.id]
+  subnets            = module.vpc.public_subnet_ids
+  security_groups    = [module.security_groups.alb_sg_id]
 }
 
 
@@ -250,19 +162,19 @@ resource "aws_route53_record" "www" {
 }
 
 resource "aws_appautoscaling_target" "ecs" {
-  min_capacity       = 1
-  max_capacity       = 3
+  min_capacity = 1
+  max_capacity = 3
 
   # IMPORTANT: service/<cluster-name>/<service-name>
-  resource_id        = "service/${var.project_name}-cluster/${aws_ecs_service.service.name}"
+  resource_id = "service/${var.project_name}-cluster/${aws_ecs_service.service.name}"
 
   scalable_dimension = "ecs:service:DesiredCount"
   service_namespace  = "ecs"
 }
 
 resource "aws_appautoscaling_policy" "cpu" {
-  name               = "ecs-cpu-scaling"
-  policy_type        = "TargetTrackingScaling"
+  name        = "ecs-cpu-scaling"
+  policy_type = "TargetTrackingScaling"
 
   resource_id        = aws_appautoscaling_target.ecs.resource_id
   scalable_dimension = aws_appautoscaling_target.ecs.scalable_dimension
